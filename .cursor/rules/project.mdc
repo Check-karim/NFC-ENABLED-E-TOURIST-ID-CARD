@@ -1,0 +1,39 @@
+---
+description: NFC E-Tourist ID Card project conventions and architecture
+alwaysApply: true
+---
+
+# NFC-Enabled E-Tourist ID Card — Project Rules
+
+## Tech Stack
+- **Backend**: PHP 7.4+ (procedural), MySQL via MySQLi
+- **Frontend**: Vanilla HTML/CSS/JS, Font Awesome 6, Inter font
+- **Hardware**: ESP32 + PN532 NFC RFID v3 (SPI mode, 115200 baud)
+- **Server**: XAMPP (Apache + MySQL), project root at `/nfc`
+
+## Project Structure
+```
+nfc/
+├── includes/       # config.php, header.php, footer.php (shared)
+├── assets/css/     # style.css (single file, CSS custom properties)
+├── assets/js/      # app.js (nav toggle, photo preview, NFC Web Serial)
+├── api/            # JSON API endpoints (nfc_read.php, nfc_write.php)
+├── uploads/        # Tourist photo uploads
+├── esp32_sketch/   # Arduino .ino file for ESP32 + PN532
+├── database.sql    # Full schema + seed data
+└── *.php           # Page controllers (index, about, login, dashboard, tourists, tourist_form, nfc_manager)
+```
+
+## Conventions
+- Every page includes `config.php` first, then `header.php` / `footer.php`
+- Use `sanitize()` for all user output (XSS prevention)
+- Use prepared statements for all SQL queries
+- Flash messages via `setFlash()` / `getFlash()`
+- Auth check via `requireLogin()` on admin pages
+- NFC communication uses Web Serial API → ESP32 serial at 115200 baud
+- ESP32 protocol: `READ\n` to read, `WRITE:{json}\n` to write; responses end with `DONE` or `ERROR`
+
+## Database
+- DB name: `nfc_tourist_db` — tables: `admins`, `tourists`, `nfc_logs`
+- Admin credentials: username `admin`, password `admin` (plain text)
+- Tourist photos stored as filenames in `uploads/` directory
