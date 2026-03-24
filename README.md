@@ -78,16 +78,25 @@ Navigate to: [http://localhost/nfc/](http://localhost/nfc/)
 
 ## ESP32 + PN532 Hardware Setup
 
-### Wiring (SPI Mode)
+### Wiring (I2C Mode)
 
 | PN532 Pin | ESP32 Pin |
 |-----------|-----------|
-| SCK       | GPIO 18   |
-| MISO      | GPIO 19   |
-| MOSI      | GPIO 23   |
-| SS        | GPIO 5    |
+| SDA       | GPIO 21   |
+| SCL       | GPIO 22   |
+| IRQ       | GPIO 2    |
+| RSTO      | (not connected) |
 | VCC       | 3.3V      |
 | GND       | GND       |
+
+> **DIP Switches:** Set the PN532 DIP switches to I2C mode (Switch 1 ON, Switch 2 OFF).
+
+### Buzzer (optional)
+
+| Buzzer Pin | ESP32 Pin |
+|------------|-----------|
+| (+)        | GPIO 5    |
+| (-)        | GND       |
 
 ### Arduino Setup
 

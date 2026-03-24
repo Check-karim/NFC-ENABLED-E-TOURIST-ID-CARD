@@ -49,9 +49,14 @@ const NFC = {
     port: null,
     reader: null,
     writer: null,
+    _readableClosed: null,
+    _writableClosed: null,
     logContainer: null,
     statusEl: null,
     isConnected: false,
+    _busy: false,
+
+    BOOT_NOISE: /^(ets |rst:|configsip|clk_drv|mode:|load:|ho \d|entry |SPIWP)/,
 
     init(logId = 'serialLog', statusId = 'nfcStatus') {
         this.logContainer = document.getElementById(logId);
@@ -85,17 +90,28 @@ const NFC = {
             this.port = await navigator.serial.requestPort();
             await this.port.open({ baudRate: 115200 });
 
-            const textDecoder = new TextDecoderStream();
-            this.port.readable.pipeTo(textDecoder.writable);
-            this.reader = textDecoder.readable.getReader();
+            await this.port.setSignals({ dataTerminalReady: false, requestToSend: false });
 
-            const textEncoder = new TextEncoderStream();
-            textEncoder.readable.pipeTo(this.port.writable);
-            this.writer = textEncoder.writable.getWriter();
+            const decoderStream = new TextDecoderStream();
+            this._readableClosed = this.port.readable.pipeTo(decoderStream.writable);
+            this.reader = decoderStream.readable.getReader();
+
+            const encoderStream = new TextEncoderStream();
+            this._writableClosed = encoderStream.readable.pipeTo(this.port.writable);
+            this.writer = encoderStream.writable.getWriter();
 
             this.isConnected = true;
-            this.log('Connected to ESP32 successfully', 'success');
-            this.setStatus('Connected', 'connected');
+            this.log('Connected — waiting for ESP32 to be ready...', 'info');
+            this.setStatus('Connecting...', 'waiting');
+
+            const ready = await this._waitForReady(8000);
+            if (ready) {
+                this.log('ESP32 is READY', 'success');
+                this.setStatus('Connected', 'connected');
+            } else {
+                this.log('ESP32 connected (READY signal not received — may still work)', 'success');
+                this.setStatus('Connected', 'connected');
+            }
             return true;
         } catch (err) {
             this.log(`Connection failed: ${err.message}`, 'error');
@@ -104,12 +120,51 @@ const NFC = {
         }
     },
 
+    async _waitForReady(timeoutMs) {
+        const deadline = Date.now() + timeoutMs;
+        let buffer = '';
+        while (Date.now() < deadline) {
+            try {
+                const { value, done } = await Promise.race([
+                    this.reader.read(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), deadline - Date.now()))
+                ]);
+                if (done) break;
+                buffer += value;
+                const parts = buffer.split('\n');
+                buffer = parts.pop();
+                for (const line of parts) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    if (this.BOOT_NOISE.test(trimmed)) continue;
+                    if (trimmed === 'READY') return true;
+                }
+            } catch {
+                break;
+            }
+        }
+        return false;
+    },
+
     async disconnect() {
+        this.isConnected = false;
         try {
-            if (this.reader) { this.reader.cancel(); this.reader = null; }
-            if (this.writer) { this.writer.close(); this.writer = null; }
-            if (this.port) { await this.port.close(); this.port = null; }
-            this.isConnected = false;
+            if (this.reader) {
+                await this.reader.cancel();
+                await this._readableClosed.catch(() => {});
+                this.reader = null;
+                this._readableClosed = null;
+            }
+            if (this.writer) {
+                await this.writer.close();
+                await this._writableClosed.catch(() => {});
+                this.writer = null;
+                this._writableClosed = null;
+            }
+            if (this.port) {
+                await this.port.close();
+                this.port = null;
+            }
             this.log('Disconnected from ESP32', 'info');
             this.setStatus('Disconnected', 'waiting');
         } catch (err) {
@@ -130,47 +185,43 @@ const NFC = {
         }
     },
 
-    async readLine(timeoutMs = 10000) {
-        if (!this.reader) return null;
-        let buffer = '';
-        const deadline = Date.now() + timeoutMs;
-
-        while (Date.now() < deadline) {
-            try {
-                const { value, done } = await this.reader.read();
-                if (done) break;
-                buffer += value;
-                const lines = buffer.split('\n');
-                if (lines.length > 1) {
-                    return lines[0].trim();
-                }
-            } catch {
-                break;
-            }
-        }
-        return buffer.trim() || null;
-    },
-
     async readUntilDone(timeoutMs = 15000) {
         const lines = [];
         const deadline = Date.now() + timeoutMs;
         let buffer = '';
+        let gotReboot = false;
 
         while (Date.now() < deadline) {
             try {
-                const { value, done } = await this.reader.read();
+                const { value, done } = await Promise.race([
+                    this.reader.read(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), Math.max(100, deadline - Date.now())))
+                ]);
                 if (done) break;
                 buffer += value;
                 const parts = buffer.split('\n');
                 buffer = parts.pop();
                 for (const line of parts) {
                     const trimmed = line.trim();
-                    if (trimmed) {
-                        lines.push(trimmed);
-                        this.log(`Received: ${trimmed}`, 'success');
-                        if (trimmed === 'DONE' || trimmed === 'ERROR') {
-                            return lines;
-                        }
+                    if (!trimmed) continue;
+
+                    if (this.BOOT_NOISE.test(trimmed)) {
+                        gotReboot = true;
+                        continue;
+                    }
+
+                    if (gotReboot && trimmed === 'READY') {
+                        gotReboot = false;
+                        this.log('ESP32 rebooted — resending command...', 'info');
+                        return '__REBOOT__';
+                    }
+
+                    if (gotReboot) continue;
+
+                    lines.push(trimmed);
+                    this.log(`Received: ${trimmed}`, 'success');
+                    if (trimmed === 'DONE' || trimmed === 'ERROR') {
+                        return lines;
                     }
                 }
             } catch {
@@ -180,32 +231,64 @@ const NFC = {
         return lines;
     },
 
-    async writeCard(touristData) {
+    async writeCard(touristData, _retries = 2) {
         if (!this.isConnected) {
             this.log('Please connect to ESP32 first', 'error');
             return null;
         }
+        if (this._busy) {
+            this.log('Device is busy, please wait...', 'error');
+            return null;
+        }
 
-        this.log('Sending WRITE command...', 'info');
-        const json = JSON.stringify(touristData);
-        await this.send(`WRITE:${json}`);
-        this.log('Place NFC card on reader...', 'info');
+        this._busy = true;
+        try {
+            this.log('Sending WRITE command...', 'info');
+            const json = JSON.stringify(touristData);
+            await this.send(`WRITE:${json}`);
+            this.log('Place NFC card on reader...', 'info');
 
-        const response = await this.readUntilDone(20000);
-        return response;
+            const response = await this.readUntilDone(30000);
+
+            if (response === '__REBOOT__' && _retries > 0) {
+                this.log('Retrying write after reboot...', 'info');
+                await new Promise(r => setTimeout(r, 1000));
+                this._busy = false;
+                return this.writeCard(touristData, _retries - 1);
+            }
+            return response;
+        } finally {
+            this._busy = false;
+        }
     },
 
-    async readCard() {
+    async readCard(_retries = 2) {
         if (!this.isConnected) {
             this.log('Please connect to ESP32 first', 'error');
             return null;
         }
+        if (this._busy) {
+            this.log('Device is busy, please wait...', 'error');
+            return null;
+        }
 
-        this.log('Sending READ command...', 'info');
-        await this.send('READ');
-        this.log('Place NFC card on reader...', 'info');
+        this._busy = true;
+        try {
+            this.log('Sending READ command...', 'info');
+            await this.send('READ');
+            this.log('Place NFC card on reader...', 'info');
 
-        const response = await this.readUntilDone(20000);
-        return response;
+            const response = await this.readUntilDone(30000);
+
+            if (response === '__REBOOT__' && _retries > 0) {
+                this.log('Retrying read after reboot...', 'info');
+                await new Promise(r => setTimeout(r, 1000));
+                this._busy = false;
+                return this.readCard(_retries - 1);
+            }
+            return response;
+        } finally {
+            this._busy = false;
+        }
     }
 };

@@ -8,7 +8,7 @@ alwaysApply: true
 ## Tech Stack
 - **Backend**: PHP 7.4+ (procedural), MySQL via MySQLi
 - **Frontend**: Vanilla HTML/CSS/JS, Font Awesome 6, Inter font
-- **Hardware**: ESP32 + PN532 NFC RFID v3 (SPI mode, 115200 baud)
+- **Hardware**: ESP32 + PN532 NFC RFID v3 (I2C mode, 115200 baud)
 - **Server**: XAMPP (Apache + MySQL), project root at `/nfc`
 
 ## Project Structure
@@ -32,6 +32,7 @@ nfc/
 - Auth check via `requireLogin()` on admin pages
 - NFC communication uses Web Serial API → ESP32 serial at 115200 baud
 - ESP32 protocol: `READ\n` to read, `WRITE:{json}\n` to write; responses end with `DONE` or `ERROR`
+- ESP32 I2C wiring: SDA→GPIO 21, SCL→GPIO 22, IRQ→GPIO 2; Buzzer→GPIO 5
 
 ## Database
 - DB name: `nfc_tourist_db` — tables: `admins`, `tourists`, `nfc_logs`
